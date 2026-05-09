@@ -236,7 +236,7 @@ function onStopped() {
   state = 'idle';
   const idx = winnerIdx(angle);
   const seg = segs[idx];
-  res.textContent = `結果: ${seg.label} 獲得！`;
+  res.textContent = `結果: ${seg.label} 追加！`;
   res.className = seg.value > 0 ? 'win' : 'lose';
   btn.textContent = 'もう一度';
   btn.disabled = false;
