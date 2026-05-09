@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ラッキールーレット</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  min-height: 100vh;
+  background: radial-gradient(ellipse at center, #1a1a3e 0%, #0a0a1a 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  font-family: 'Segoe UI', sans-serif;
+  color: #fff;
+  user-select: none;
+}
+
+h1 {
+  font-size: 2rem;
+  margin-bottom: 28px;
+  letter-spacing: 6px;
+  text-shadow: 0 0 30px rgba(255, 215, 0, 0.5);
+}
+
+.wrap {
+  position: relative;
+  margin-bottom: 32px;
+}
+
+/* 上部に固定ポインタ */
+.pointer {
+  position: absolute;
+  top: -2px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 0; height: 0;
+  border-left: 14px solid transparent;
+  border-right: 14px solid transparent;
+  border-top: 30px solid #FFD700;
+  z-index: 2;
+  filter: drop-shadow(0 0 10px rgba(255, 215, 0, 0.9));
+}
+
+canvas { display: block; }
+
+#btn {
+  padding: 14px 56px;
+  font-size: 1.2rem;
+  font-weight: bold;
+  letter-spacing: 3px;
+  border: none;
+  border-radius: 50px;
+  cursor: pointer;
+  background: linear-gradient(135deg, #f6d365, #fda085);
+  color: #2c2c2c;
+  box-shadow: 0 4px 20px rgba(246, 211, 101, 0.4);
+  transition: transform .2s, box-shadow .2s;
+}
+#btn:hover:not(:disabled) {
+  transform: translateY(-3px);
+  box-shadow: 0 8px 28px rgba(246, 211, 101, 0.6);
+}
+#btn:disabled { opacity: .5; cursor: default; transform: none; }
+
+#result {
+  margin-top: 24px;
+  font-size: 1.8rem;
+  font-weight: bold;
+  min-height: 2.2rem;
+  text-align: center;
+  letter-spacing: 2px;
+}
+.win  { color: #2ED573; text-shadow: 0 0 20px rgba(46, 213, 115, 0.7); }
+.lose { color: #FF6B81; text-shadow: 0 0 20px rgba(255, 107, 129, 0.7); }
+</style>
+</head>
+<body>
+
+<h1>ラッキールーレット</h1>
+<div class="wrap">
+  <div class="pointer"></div>
+  <canvas id="c" width="420" height="420"></canvas>
+</div>
+<button id="btn">スタート</button>
+<div id="result"></div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+const btn    = document.getElementById('btn');
+const res    = document.getElementById('result');
+
+const W = canvas.width, H = canvas.height;
+const cx = W / 2, cy = H / 2;
+const R   = 195;   // ホイール半径
+const HUB = 26;    // 中央ハブ半径
+
+const N   = 6;
+const SEG = (2 * Math.PI) / N;
+const TOP = -Math.PI / 2;  // 12時の方向（canvas座標）
+
+const segs = [
+  { label: '1000円',  value:  1000, fill: '#c0392b' },
+  { label: '-100円',  value:  -100, fill: '#2471a3' },
+  { label: '300円',   value:   300, fill: '#d35400' },
+  { label: '-300円',  value:  -300, fill: '#7d3c98' },
+  { label: '100円',   value:   100, fill: '#1e8449' },
+  { label: '-1000円', value: -1000, fill: '#2c3e50' },
+];
+
+// プラスのマスのインデックス [0, 2, 4]
+const POS_IDX = segs.reduce((a, s, i) => (s.value > 0 ? [...a, i] : a), []);
+
+let angle  = 0;
+let state  = 'idle';      // 'idle' | 'spinning' | 'stopping'
+let stopFrom = 0, stopTo = 0, stopT0 = 0, stopDuration = 0;
+const SPEED   = 0.10;     // 回転速度（rad/frame @ 60fps）
+const V0_MS   = SPEED * 60 / 1000;  // rad/ms（停止開始時の速度）
+
+// 等減速イージング: 速度が v0 から 0 へ線形減少
+// x(t) = 2t - t²  → x'(0)=2, x'(1)=0, x(1)=1
+// 初期速度 = 2*D/T = V0_MS に設定するので、停止前後で速度が連続
+function easeLinearDecel(t) {
+  return 2 * t - t * t;
+}
+
+// ポインタ（12時）にあるマスのインデックスを返す
+// マスiの中心 = TOP + angle + i*SEG → TOP と一致するとき angle + i*SEG ≡ 0 (mod 2π)
+function winnerIdx(a) {
+  return Math.round(((-a / SEG) % N + N) % N) % N;
+}
+
+// ストップ時の目標角度と所要時間を計算
+// 現在の速度から連続する等減速で、プラスのマスに自然に止まる
+function stopParams(from) {
+  // 現在角度から 2～3 回転先の範囲でプラスのマスを探す
+  const Dmin = 2 * 2 * Math.PI;
+  const Dmax = 3 * 2 * Math.PI;
+
+  const candidates = [];
+  for (const idx of POS_IDX) {
+    const base = ((-idx * SEG) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI);
+    const nMin = Math.ceil((from + Dmin - base) / (2 * Math.PI));
+    const target = base + nMin * 2 * Math.PI;
+    if (target <= from + Dmax) candidates.push(target);
+  }
+
+  // 3つのプラスのマスが1回転区間内に必ず存在するので candidates は空にならない
+  const target = candidates[Math.floor(Math.random() * candidates.length)];
+  const D = target - from;
+  // T = 2D / v0  ← 等減速で初期速度が V0_MS と一致する条件
+  const duration = (2 * D) / V0_MS;
+  return { target, duration };
+}
+
+function drawWheel(a) {
+  ctx.clearRect(0, 0, W, H);
+
+  // 影
+  ctx.beginPath();
+  ctx.arc(cx, cy, R + 14, 0, 2 * Math.PI);
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+  ctx.fill();
+
+  // マス（セグメント）
+  for (let i = 0; i < N; i++) {
+    const s = TOP + a + i * SEG - SEG / 2;
+    const e = s + SEG;
+    const m = s + SEG / 2;
+
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, R, s, e);
+    ctx.closePath();
+    ctx.fillStyle = segs[i].fill;
+    ctx.fill();
+
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // ラベル（放射方向、外側に向かって読む）
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(m);
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 17px Segoe UI, sans-serif';
+    ctx.shadowColor = 'rgba(0,0,0,0.8)';
+    ctx.shadowBlur = 5;
+    ctx.fillText(segs[i].label, R - 14, 0);
+    ctx.restore();
+  }
+
+  // セグメント境界のドット
+  for (let i = 0; i < N; i++) {
+    const a_ = TOP + a + i * SEG - SEG / 2;
+    const dx = cx + (R - 9) * Math.cos(a_);
+    const dy = cy + (R - 9) * Math.sin(a_);
+    ctx.beginPath();
+    ctx.arc(dx, dy, 5, 0, 2 * Math.PI);
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.65)';
+    ctx.fill();
+  }
+
+  // 外周のゴールドリング
+  ctx.beginPath();
+  ctx.arc(cx, cy, R + 6, 0, 2 * Math.PI);
+  const gring = ctx.createLinearGradient(0, 0, W, H);
+  gring.addColorStop(0,   '#f9ca24');
+  gring.addColorStop(0.5, '#f0932b');
+  gring.addColorStop(1,   '#f9ca24');
+  ctx.strokeStyle = gring;
+  ctx.lineWidth = 9;
+  ctx.stroke();
+
+  // 中央ハブ
+  const hg = ctx.createRadialGradient(cx - 5, cy - 5, 2, cx, cy, HUB);
+  hg.addColorStop(0, '#ffe082');
+  hg.addColorStop(1, '#e65100');
+  ctx.beginPath();
+  ctx.arc(cx, cy, HUB, 0, 2 * Math.PI);
+  ctx.fillStyle = hg;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+}
+
+function onStopped() {
+  state = 'idle';
+  const idx = winnerIdx(angle);
+  const seg = segs[idx];
+  res.textContent = `結果: ${seg.label} 獲得！`;
+  res.className = seg.value > 0 ? 'win' : 'lose';
+  btn.textContent = 'もう一度';
+  btn.disabled = false;
+}
+
+function loop(ts) {
+  if (state === 'spinning') {
+    angle += SPEED;
+    drawWheel(angle);
+    requestAnimationFrame(loop);
+
+  } else if (state === 'stopping') {
+    const t = Math.min((ts - stopT0) / stopDuration, 1);
+    angle = stopFrom + (stopTo - stopFrom) * easeLinearDecel(t);
+    drawWheel(angle);
+    if (t < 1) {
+      requestAnimationFrame(loop);
+    } else {
+      angle = stopTo;
+      drawWheel(angle);
+      onStopped();
+    }
+  }
+}
+
+btn.addEventListener('click', () => {
+  if (state === 'idle') {
+    state = 'spinning';
+    res.textContent = '';
+    res.className = '';
+    btn.textContent = 'ストップ！';
+    requestAnimationFrame(loop);
+
+  } else if (state === 'spinning') {
+    const { target, duration } = stopParams(angle);
+    stopFrom     = angle;
+    stopTo       = target;
+    stopDuration = duration;
+    stopT0       = performance.now();
+    state        = 'stopping';
+    btn.disabled = true;
+  }
+});
+
+drawWheel(0);
+</script>
+</body>
+</html>
